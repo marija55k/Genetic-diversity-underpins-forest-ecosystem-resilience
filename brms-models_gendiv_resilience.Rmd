@@ -1,0 +1,663 @@
+---
+title: "Bayesian-models_genetic-diversity_resilience"
+authors: "MW, SCGM, MK"
+date: "2026-05-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+This script contains the code used to fit hierarchical models in the study "Genetic diversity underpins forest ecosystem resilience".
+
+
+## Load packages
+
+```{r cars}
+library(dplyr)
+library(ggplot2)
+library(posterior)
+library(brms)
+library(tidyverse)
+#library(loo)
+library(posterior)
+library(bayesplot)
+```
+
+## Load & prepare data
+
+```{r}
+# Load the data (adjust separator if needed: "\t" for tab, "," for CSV)
+#setwd("/media/TrueNAS_analize/resilience_scripts")
+data23sps <- read.table("data23sps_213GCUs_Bayes.txt", header = TRUE, row.names=NULL)
+data23sps$species<-as.factor(data23sps$species)
+data23sps$GENSID<-as.factor(data23sps$GENSID)
+
+# Standardize Hs by species
+data23sps$stHs <- unlist(by(data23sps, data23sps$species, FUN = function(x) scale(x$Hs)))
+
+```
+
+
+The models aim to assess the relationship between genetic diversity metrics (Hs, π) and ecosystem resilience as measured by restoration rates (λAC1, λvar).
+
+
+# Model 1 
+
+Because species were genotyped using different technologies, which could have biased genetic diversity estimates (SPET vs. SNP arrays; see Pinosio et al. 2026), the model fit for all 23 species was based on genetic diversity estimate (Hs) standardised at the species level.
+
+```{r pressure, echo=FALSE}
+# ========================================================================================================================
+# MODEL 1.1: B = stHs, A = λAC1
+# ========================================================================================================================
+
+# Create an output folder
+model_name <- "fit_m1.1_stHs_10k_iter"
+out_dir <- paste0(model_name, "_files")
+dir.create(out_dir, showWarnings = FALSE)
+
+# Fit the model
+fit_m1.1_stHs_10k_iter <- brm(
+  formula = lambda_AC1_19Y ~ stHs + (1|GENSID),
+  data = data23sps,
+  family = gaussian(),
+  chains = 4,
+  iter = 10000,
+  warmup = 1000,
+  seed = 12345,
+  control = list(adapt_delta = 0.99, max_treedepth = 15)
+)
+
+# Summary
+print(summary(fit_m1.1_stHs_10k_iter))
+write.csv(as.data.frame(fixef(fit_m1.1_stHs_10k_iter)),
+          file.path(out_dir, paste0(model_name, "_fixef.csv")))
+hypothesis(fit_m1.1_stHs_10k_iter, "stHs < 0")
+fixef(fit_m1.1_stHs_10k_iter)
+pp_check(fit_m1.1_stHs_10k_iter)
+
+#  Convergence diagnostics
+summ <- posterior::summarise_draws(as_draws_df(fit_m1.1_stHs_10k_iter))
+print(summ %>% select(variable, rhat, ess_bulk, ess_tail))
+write.csv(summ, file.path(out_dir, paste0(model_name, "_convergence_summary.csv")))
+
+cat("\nParameters with Rhat > 1.01:\n")
+print(summ %>% filter(rhat > 1.01) %>% select(variable, rhat))
+
+cat("\nParameters with bulk ESS < 400:\n")
+print(summ %>% filter(ess_bulk < 400) %>% select(variable, ess_bulk))
+
+np <- nuts_params(fit_m1.1_stHs_10k_iter)
+n_div <- sum(np$Parameter == "divergent__" & np$Value == 1)
+cat("\nNumber of divergences:", n_div, "\n")
+
+# Trace plots
+pdf(file.path(out_dir, paste0(model_name, "_traceplots.pdf")), width = 10, height = 8)
+plot(fit_m1.1_stHs_10k_iter)
+dev.off()
+
+# Posterior predictive check
+pdf(file.path(out_dir, paste0(model_name, "_ppcheck.pdf")), width = 8, height = 6)
+pp_check(fit_m1.1_stHs_10k_iter)
+dev.off()
+
+# Model evaluation
+loo_m1.1_stHs_10k_iter <- brms::loo(fit_m1.1_stHs_10k_iter)
+print(loo_m1.1_stHs_10k_iter)
+saveRDS(loo_m1.1_stHs_10k_iter, file.path(out_dir, paste0(model_name, "_loo.rds")))
+
+# Conditional effects
+pdf(file.path(out_dir, paste0(model_name, "_conditional_effects.pdf")), width = 8, height = 6)
+plot(conditional_effects(fit_m1.1_stHs_10k_iter), ask = FALSE)
+dev.off()
+
+# Save model
+saveRDS(fit_m1.1_stHs_10k_iter, file.path(out_dir, paste0(model_name, ".rds")))
+
+
+# ----------------------------------------------------------------------
+# Visualization - example for m1.1 - lambda_AC1_19Y, stHs, 23 species
+# ----------------------------------------------------------------------
+
+# Extract the model-implied relationship 
+ce <- conditional_effects(fit_m1.1_stHs_10k_iter, effects = "stHs")
+ce_df <- as.data.frame(ce$stHs)
+
+# Plot: raw data points + model-based fitted line & CI ribbon
+ggplot() +
+    geom_point(data = data23sps, aes(x = stHs, y = lambda_AC1_19Y),
+               color = "#2E8B57", size = 2.5, alpha = 0.7) +
+    geom_ribbon(data = ce_df, aes(x = stHs, ymin = lower__, ymax = upper__),
+                fill = "#2E8B57", alpha = 0.25) +
+    geom_line(data = ce_df, aes(x = stHs, y = estimate__),
+              color = "#2E8B57", linewidth = 1.2) +
+    labs(x = expression(italic(stH[s])), y = expression(lambda[AC1])) +
+    theme_bw(base_size = 14) +
+    theme(
+      panel.grid = element_blank(),
+      panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8),
+      axis.title = element_text(size = 16),
+      axis.text = element_text(color = "black"),
+      aspect.ratio = 1
+  )
+
+
+
+
+# ========================================================================================================================
+# MODEL 1.2: B = stHs, A = λvar
+# ========================================================================================================================
+
+# Create an output folder
+model_name <- "fit_m1.2_stHs_10k_iter"
+out_dir <- paste0(model_name, "_files")
+dir.create(out_dir, showWarnings = FALSE)
+
+# Fit the model
+fit_m1.2_stHs_10k_iter <- brm(
+  formula = lambda_variance_19Y ~ stHs + (1|GENSID),
+  data = data23sps,
+  family = gaussian(),
+  chains = 4,
+  iter = 10000,
+  warmup = 1000,
+  seed = 12345,
+  control = list(adapt_delta = 0.99, max_treedepth = 15)
+)
+
+# Summary
+print(summary(fit_m1.2_stHs_10k_iter))
+write.csv(as.data.frame(fixef(fit_m1.2_stHs_10k_iter)),
+          file.path(out_dir, paste0(model_name, "_fixef.csv")))
+hypothesis(fit_m1.2_stHs_10k_iter, "stHs < 0")
+fixef(fit_m1.2_stHs_10k_iter)
+pp_check(fit_m1.2_stHs_10k_iter)
+
+#  Convergence diagnostics
+summ <- posterior::summarise_draws(as_draws_df(fit_m1.2_stHs_10k_iter))
+print(summ %>% select(variable, rhat, ess_bulk, ess_tail))
+write.csv(summ, file.path(out_dir, paste0(model_name, "_convergence_summary.csv")))
+
+cat("\nParameters with Rhat > 1.01:\n")
+print(summ %>% filter(rhat > 1.01) %>% select(variable, rhat))
+
+cat("\nParameters with bulk ESS < 400:\n")
+print(summ %>% filter(ess_bulk < 400) %>% select(variable, ess_bulk))
+
+np <- nuts_params(fit_m1.2_stHs_10k_iter)
+n_div <- sum(np$Parameter == "divergent__" & np$Value == 1)
+cat("\nNumber of divergences:", n_div, "\n")
+
+# Trace plots
+pdf(file.path(out_dir, paste0(model_name, "_traceplots.pdf")), width = 10, height = 8)
+plot(fit_m1.2_stHs_10k_iter)
+dev.off()
+
+# Posterior predictive check
+pdf(file.path(out_dir, paste0(model_name, "_ppcheck.pdf")), width = 8, height = 6)
+pp_check(fit_m1.2_stHs_10k_iter)
+dev.off()
+
+# Model evaluation
+loo_m1.2_stHs_10k_iter <- brms::loo(fit_m1.2_stHs_10k_iter)
+print(loo_m1.2_stHs_10k_iter)
+saveRDS(loo_m1.2_stHs_10k_iter, file.path(out_dir, paste0(model_name, "_loo.rds")))
+
+# Conditional effects
+pdf(file.path(out_dir, paste0(model_name, "_conditional_effects.pdf")), width = 8, height = 6)
+plot(conditional_effects(fit_m1.2_stHs_10k_iter), ask = FALSE)
+dev.off()
+
+# Save model
+saveRDS(fit_m1.2_stHs_10k_iter, file.path(out_dir, paste0(model_name, ".rds")))
+```
+
+
+# Model 2
+
+The second model was similar to the first one, but only used the 17 species genotyped with Single primer enrichment technology (SPET). Therefore, it did not standardise Hs at the species level and excluded *Abies nebrodensis*, which was represented by the only existing population, while accounting for tree species (1|sp).
+
+```{r}
+# Exclude A.nebrodensis GCU and species that were not genotyped with SPET (keep only species genotyped with the same technology)
+data17sps <- subset(
+  data23sps,
+  !species %in% c("Pinus_pinaster", "Pinus_pinea", "Pinus_sylvestris", "Populus_alba", "Populus_nigra", "Abies_nebrodensis")
+)
+```
+
+Fit model 2
+```{r}
+# ========================================================================================================================
+# MODEL 2.1 - example for B = Hs, A = λAC1
+# ========================================================================================================================
+
+# Create an output folder
+model_name <- "fit_m2.1_Hs_10k_iter"
+out_dir <- paste0(model_name, "_files")
+dir.create(out_dir, showWarnings = FALSE)
+
+# Fit the model
+fit_m2.1_Hs_10k_iter <- brm(
+  formula = lambda_xt_19Y ~ Hs + (1|species) + (1|GENSID),
+  data = data17sps,
+  family = gaussian(),
+  chains = 4,
+  iter = 10000,
+  warmup = 1000,
+  seed = 12345,
+  control = list(adapt_delta = 0.99, max_treedepth = 15)
+)
+
+# Summary
+print(summary(fit_m2.1_Hs_10k_iter))
+write.csv(as.data.frame(fixef(fit_m2.1_Hs_10k_iter)),
+          file.path(out_dir, paste0(model_name, "_fixef.csv")))
+hypothesis(fit_m2.1_Hs_10k_iter, "Hs < 0")
+fixef(fit_m2.1_Hs_10k_iter)
+pp_check(fit_m2.1_Hs_10k_iter)
+
+#  Convergence diagnostics
+summ <- posterior::summarise_draws(as_draws_df(fit_m2.1_Hs_10k_iter))
+print(summ %>% select(variable, rhat, ess_bulk, ess_tail))
+print(summ)
+write.csv(summ, file.path(out_dir, paste0(model_name, "_convergence_summary.csv")))
+
+cat("\nParameters with Rhat > 1.01:\n")
+print(summ %>% filter(rhat > 1.01) %>% select(variable, rhat))
+
+cat("\nParameters with bulk ESS < 400:\n")
+print(summ %>% filter(ess_bulk < 400) %>% select(variable, ess_bulk))
+
+np <- nuts_params(fit_m2.1_Hs_10k_iter)
+n_div <- sum(np$Parameter == "divergent__" & np$Value == 1)
+cat("\nNumber of divergences:", n_div, "\n")
+
+# Trace plots
+pdf(file.path(out_dir, paste0(model_name, "_traceplots.pdf")), width = 10, height = 8)
+plot(fit_m2.1_Hs_10k_iter)
+dev.off()
+
+# Posterior predictive check
+pdf(file.path(out_dir, paste0(model_name, "_ppcheck.pdf")), width = 8, height = 6)
+pp_check(fit_m2.1_Hs_10k_iter)
+dev.off()
+
+# Model evaluation
+loo_m2.1_Hs_10k_iter <- brms::loo(fit_m2.1_Hs_10k_iter)
+print(loo_m2.1_Hs_10k_iter)
+saveRDS(loo_m2.1_Hs_10k_iter, file.path(out_dir, paste0(model_name, "_loo.rds")))
+
+# Conditional effects
+pdf(file.path(out_dir, paste0(model_name, "_conditional_effects.pdf")), width = 8, height = 6)
+plot(conditional_effects(fit_m2.1_Hs_10k_iter), ask = FALSE)
+dev.off()
+
+# Save model
+saveRDS(fit_m2.1_Hs_10k_iter, file.path(out_dir, paste0(model_name, ".rds")))
+
+# ----------------------------------------------------------------------
+# Visualization - example for m2.1 - lambda_AC1_19Y, Hs, 17 species
+# ----------------------------------------------------------------------
+
+# Extract the model-implied relationship 
+ce <- conditional_effects(fit_m2.1_Hs_10k_iter, effects = "Hs")
+ce_df <- as.data.frame(ce$Hs)
+
+# Plot: raw data points + model-based fitted line & CI ribbon
+ggplot() +
+  geom_point(data = data17sps, aes(x = Hs, y = lambda_AC1_19Y),
+             color = "#2E8B57", size = 2.5, alpha = 0.7,) +
+  geom_ribbon(data = ce_df, aes(x = Hs, ymin = lower__, ymax = upper__),
+              fill = "#2E8B57", alpha = 0.25) +
+  geom_line(data = ce_df, aes(x = Hs, y = estimate__),
+            color = "#2E8B57", linewidth = 1.2) +
+  labs(x = expression(italic(H[s])), y = expression(lambda[AC1])) +
+  theme_bw(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8),
+    axis.title = element_text(size = 16),
+    axis.text = element_text(color = "black"),
+    aspect.ratio = 1
+  )
+
+
+
+
+# ========================================================================================================================
+# MODEL 2.2 - example for B = Hs, A = λvar
+# ========================================================================================================================
+
+# Create an output folder
+model_name <- "fit_m2.2_Hs_10k_iter"
+out_dir <- paste0(model_name, "_files")
+dir.create(out_dir, showWarnings = FALSE)
+
+# Fit the model
+fit_m2.2_Hs_10k_iter <- brm(
+  formula = lambda_variance_19Y ~ Hs + (1|species) + (1|GENSID),
+  data = data17sps,
+  family = gaussian(),
+  chains = 4,
+  iter = 10000,
+  warmup = 1000,
+  seed = 12345,
+  control = list(adapt_delta = 0.99, max_treedepth = 15)
+)
+
+# Summary
+print(summary(fit_m2.2_Hs_10k_iter))
+write.csv(as.data.frame(fixef(fit_m2.2_Hs_10k_iter)),
+          file.path(out_dir, paste0(model_name, "_fixef.csv")))
+hypothesis(fit_m2.2_Hs_10k_iter, "Hs < 0")
+fixef(fit_m2.2_Hs_10k_iter)
+pp_check(fit_m2.2_Hs_10k_iter)
+
+#  Convergence diagnostics
+summ <- posterior::summarise_draws(as_draws_df(fit_m2.2_Hs_10k_iter))
+print(summ %>% select(variable, rhat, ess_bulk, ess_tail))
+write.csv(summ, file.path(out_dir, paste0(model_name, "_convergence_summary.csv")))
+
+cat("\nParameters with Rhat > 1.01:\n")
+print(summ %>% filter(rhat > 1.01) %>% select(variable, rhat))
+
+cat("\nParameters with bulk ESS < 400:\n")
+print(summ %>% filter(ess_bulk < 400) %>% select(variable, ess_bulk))
+
+np <- nuts_params(fit_m2.2_Hs_10k_iter)
+n_div <- sum(np$Parameter == "divergent__" & np$Value == 1)
+cat("\nNumber of divergences:", n_div, "\n")
+
+# Trace plots
+pdf(file.path(out_dir, paste0(model_name, "_traceplots.pdf")), width = 10, height = 8)
+plot(fit_m2.2_Hs_10k_iter)
+dev.off()
+
+# Posterior predictive check
+pdf(file.path(out_dir, paste0(model_name, "_ppcheck.pdf")), width = 8, height = 6)
+pp_check(fit_m2.2_Hs_10k_iter)
+dev.off()
+
+# Model evaluation
+loo_m2.2_Hs_10k_iter <- brms::loo(fit_m2.2_Hs_10k_iter)
+print(loo_m2.2_Hs_10k_iter)
+saveRDS(loo_m2.2_Hs_10k_iter, file.path(out_dir, paste0(model_name, "_loo.rds")))
+
+# Conditional effects
+pdf(file.path(out_dir, paste0(model_name, "_conditional_effects.pdf")), width = 8, height = 6)
+plot(conditional_effects(fit_m2.2_Hs_10k_iter), ask = FALSE)
+dev.off()
+
+# Save model
+saveRDS(fit_m2.2_Hs_10k_iter, file.path(out_dir, paste0(model_name, ".rds")))
+
+```
+
+
+# Model 3
+We extend model 2 by including a genetic diversity × species interaction term (B × sp) to assess the species-specific component of the B-A relationship, 
+```{r}
+# ========================================================================================================================
+# MODEL 3 - example for B = Hs, A = λAC1
+# ========================================================================================================================
+
+# Create an output folder
+model_name <- "fit_m3.1_Hs_10k_iter"
+out_dir <- paste0(model_name, "_files")
+dir.create(out_dir, showWarnings = FALSE)
+
+#Fit the model
+fit_m3.1_Hs_10k_iter <- brm(
+  formula = lambda_AC1_19Y ~ Hs * species + (1|GENSID),
+  data = data17sps,
+  family = gaussian(),
+  chains = 4,
+  iter = 10000,
+  warmup = 1000,
+  seed = 12345,
+  control = list(adapt_delta = 0.99, max_treedepth = 25)
+)
+
+# Summary
+print(summary(fit_m3.1_Hs_10k_iter))
+write.csv(as.data.frame(fixef(fit_m3.1_Hs_10k_iter)),
+          file.path(out_dir, paste0(model_name, "_fixef.csv")))
+hypothesis(fit_m3.1_Hs_10k_iter, "Hs < 0")
+
+# Species-specific slopes
+post <- as_draws_df(fit_m3.1_Hs_10k_iter)
+tree_sp <- levels(data17sps$species)
+ref_species <- tree_sp[1]
+
+# Reference species slope
+ref_slopes <- tibble(
+  tree_sp = ref_species,
+  slope = post$b_Hs
+)
+
+# All other slopes
+slopes <- post %>%
+  mutate(global_slope = b_Hs) %>%
+  select(global_slope, starts_with("b_Hs:species")) %>%
+  pivot_longer(-global_slope,
+               names_to = "term",
+               values_to = "adjustment") %>%
+  mutate(
+    tree_sp = str_replace(term, "b_Hs:species", ""),
+    slope = global_slope + adjustment
+  )
+
+# Put together and summary
+slopes <- bind_rows(ref_slopes, slopes)
+
+summary_slopes <- slopes %>%
+  group_by(tree_sp) %>%
+  summarise(
+    mean = mean(slope),
+    l95 = quantile(slope, 0.05),
+    u95 = quantile(slope, 0.95),
+    p_negative = mean(slope < 0),
+    p_positive = mean(slope > 0),
+  ) %>%
+  arrange(mean)
+write.csv(summary_slopes, "summary_slopes.csv")
+
+# Forest plot
+p_forest <- ggplot(summary_slopes, aes(x = reorder(tree_sp, mean), y = mean)) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = l95, ymax = u95), width = 0.2) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  labs(x = "Species", y = "Species-specific slopes (β)")
+
+pdf(file.path(out_dir, paste0(model_name, "_forest_plot.pdf")), width = 9, height = 6)
+print(p_forest)
+dev.off()
+
+# Forest plot excluding Q. pubescens
+plot_data <- summary_slopes %>% filter(tree_sp != "Quercus_pubescens")
+p_forest_no_pub <- ggplot(plot_data, aes(x = reorder(tree_sp, mean), y = mean)) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = l95, ymax = u95), width = 0.2) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  labs(x = "Species", y = "Species-specific slopes (β)")
+
+pdf(file.path(out_dir, paste0(model_name, "_forest_plot_no_pubescens.pdf")), width = 9, height = 6)
+print(p_forest_no_pub)
+dev.off()
+
+#  Convergence diagnostics
+summ <- posterior::summarise_draws(as_draws_df(fit_m3.1_Hs_10k_iter))
+print(summ %>% select(variable, rhat, ess_bulk, ess_tail))
+write.csv(summ, file.path(out_dir, paste0(model_name, "_convergence_summary.csv")))
+
+cat("\nParameters with Rhat > 1.01:\n")
+print(summ %>% filter(rhat > 1.01) %>% select(variable, rhat))
+
+cat("\nParameters with bulk ESS < 400:\n")
+print(summ %>% filter(ess_bulk < 400) %>% select(variable, ess_bulk))
+
+np <- nuts_params(fit_m3.1_Hs_10k_iter)
+n_div <- sum(np$Parameter == "divergent__" & np$Value == 1)
+cat("\nNumber of divergences:", n_div, "\n")
+
+# Trace plots
+pdf(file.path(out_dir, paste0(model_name, "_traceplots.pdf")), width = 10, height = 8)
+plot(fit_m3.1_Hs_10k_iter)
+dev.off()
+
+# Posterior predictive check
+pdf(file.path(out_dir, paste0(model_name, "_ppcheck.pdf")), width = 8, height = 6)
+pp_check(fit_m3.1_Hs_10k_iter)
+dev.off()
+
+# Model evaluation
+loo_m3.1_Hs_10k_iter <- brms::loo(fit_m3.1_Hs_10k_iter)
+print(loo_m3.1_Hs_10k_iter)
+saveRDS(loo_m3.1_Hs_10k_iter, file.path(out_dir, paste0(model_name, "_loo.rds")))
+
+# Conditional effects
+pdf(file.path(out_dir, paste0(model_name, "_conditional_effects.pdf")), width = 8, height = 6)
+plot(conditional_effects(fit_m3.1_Hs_10k_iter), ask = FALSE)
+dev.off()
+
+# Save model
+saveRDS(fit_m3.1_Hs_10k_iter, file.path(out_dir, paste0(model_name, ".rds")))
+
+
+
+# ========================================================================================================================
+# MODEL 3.2 - example for B = Hs, A = λvar
+# ========================================================================================================================
+
+# Create an output folder
+model_name <- "fit_m3.2_Hs_10k_iter"
+out_dir <- paste0(model_name, "_files")
+dir.create(out_dir, showWarnings = FALSE)
+
+#Fit the model
+fit_m3.2_Hs_10k_iter <- brm(
+  formula = lambda_variance_19Y ~ Hs * species + (1|GENSID),
+  data = data17sps,
+  family = gaussian(),
+  chains = 4,
+  iter = 10000,
+  warmup = 1000,
+  seed = 12345,
+  control = list(adapt_delta = 0.99, max_treedepth = 25)
+)
+
+# Summary
+print(summary(fit_m3.2_Hs_10k_iter))
+write.csv(as.data.frame(fixef(fit_m3.2_Hs_10k_iter)),
+          file.path(out_dir, paste0(model_name, "_fixef.csv")))
+hypothesis(fit_m3.2_Hs_10k_iter, "Hs < 0")
+
+# Species-specific slopes
+post <- as_draws_df(fit_m3.2_Hs_10k_iter)
+tree_sp <- levels(data17sps$species)   
+ref_species <- tree_sp[1]
+
+# Reference species slope
+ref_slopes <- tibble(
+  tree_sp = ref_species,
+  slope = post$b_Hs
+)
+
+# All other slopes
+slopes <- post %>%
+  mutate(global_slope = b_Hs) %>%
+  select(global_slope, starts_with("b_Hs:species")) %>%
+  pivot_longer(-global_slope,
+               names_to = "term",
+               values_to = "adjustment") %>%
+  mutate(
+    tree_sp = str_replace(term, "b_Hs:species", ""),
+    slope = global_slope + adjustment
+  )
+
+# Put together and summary
+slopes <- bind_rows(ref_slopes, slopes)
+summary_slopes <- slopes %>%
+  group_by(tree_sp) %>%
+  summarise(
+    mean = mean(slope),
+    l95 = quantile(slope, 0.05),
+    u95 = quantile(slope, 0.95),
+    p_negative = mean(slope < 0),
+    p_positive = mean(slope > 0),
+  ) %>%
+  arrange(mean)
+write.csv(summary_slopes, "summary_slopes.csv")
+
+
+# Forest plot
+p_forest <- ggplot(summary_slopes, aes(x = reorder(tree_sp, mean), y = mean)) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = l95, ymax = u95), width = 0.2) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  labs(x = "Species", y = "Species-specific slopes (β)")
+
+pdf(file.path(out_dir, paste0(model_name, "_forest_plot.pdf")), width = 9, height = 6)
+print(p_forest)
+dev.off()
+
+# Forest plot excluding Q. pubescens
+plot_data <- summary_slopes %>% filter(tree_sp != "Quercus_pubescens")
+p_forest_no_pub <- ggplot(plot_data, aes(x = reorder(tree_sp, mean), y = mean)) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = l95, ymax = u95), width = 0.2) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  labs(x = "Species", y = "Species-specific slopes (β)")
+
+pdf(file.path(out_dir, paste0(model_name, "_forest_plot_no_pubescens.pdf")), width = 9, height = 6)
+print(p_forest_no_pub)
+dev.off()
+
+
+
+#  Convergence diagnostics
+summ <- posterior::summarise_draws(as_draws_df(fit_m3.2_Hs_10k_iter))
+print(summ %>% select(variable, rhat, ess_bulk, ess_tail))
+write.csv(summ, file.path(out_dir, paste0(model_name, "_convergence_summary.csv")))
+
+cat("\nParameters with Rhat > 1.01:\n")
+print(summ %>% filter(rhat > 1.01) %>% select(variable, rhat))
+
+cat("\nParameters with bulk ESS < 400:\n")
+print(summ %>% filter(ess_bulk < 400) %>% select(variable, ess_bulk))
+
+np <- nuts_params(fit_m3.2_Hs_10k_iter)
+n_div <- sum(np$Parameter == "divergent__" & np$Value == 1)
+cat("\nNumber of divergences:", n_div, "\n")
+
+# Trace plots
+pdf(file.path(out_dir, paste0(model_name, "_traceplots.pdf")), width = 10, height = 8)
+plot(fit_m3.2_Hs_10k_iter)
+dev.off()
+
+# Posterior predictive check
+pdf(file.path(out_dir, paste0(model_name, "_ppcheck.pdf")), width = 8, height = 6)
+pp_check(fit_m3.2_Hs_10k_iter)
+dev.off()
+
+# Model evaluation
+loo_m3.2_Hs_10k_iter <- brms::loo(fit_m3.2_Hs_10k_iter)
+print(loo_m3.2_Hs_10k_iter)
+saveRDS(loo_m3.2_Hs_10k_iter, file.path(out_dir, paste0(model_name, "_loo.rds")))
+
+# Conditional effects
+pdf(file.path(out_dir, paste0(model_name, "_conditional_effects.pdf")), width = 8, height = 6)
+plot(conditional_effects(fit_m3.2_Hs_10k_iter), ask = FALSE)
+dev.off()
+
+# Save model
+saveRDS(fit_m3.2_Hs_10k_iter, file.path(out_dir, paste0(model_name, ".rds")))
+
+```
+
